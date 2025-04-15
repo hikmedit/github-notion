@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>GitHub Issues to Notion Settings</title>
+  <style>
+    body { font-family: sans-serif; width: 300px; padding: 10px; }
+    label { display: block; margin-top: 10px; }
+    input[type="text"], input[type="password"] { width: 95%; padding: 5px; margin-top: 3px; }
+    button { margin-top: 15px; padding: 8px 15px; }
+    #status { margin-top: 10px; color: green; }
+  </style>
+</head>
+<body>
+  <h2>Settings</h2>
+
+  <label for="githubToken">GitHub Token:</label>
+  <input type="password" id="githubToken">
+
+  <label for="githubRepo">GitHub Repo (user/repo):</label>
+  <input type="text" id="githubRepo">
+
+  <label for="notionToken">Notion Integration Token:</label>
+  <input type="password" id="notionToken">
+
+  <label for="notionDbId">Notion Database ID:</label>
+  <input type="text" id="notionDbId">
+
+  <button id="saveButton">Save Settings</button>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html> 
