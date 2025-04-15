@@ -29,7 +29,7 @@
       font-size: 14px;
       color: #24292e;
     }
-    input {
+    input, textarea, select {
       width: 100%;
       padding: 8px 12px;
       border: 1px solid #d1d5da;
@@ -38,7 +38,12 @@
       font-size: 14px;
       transition: border-color 0.2s ease;
     }
-    input:focus {
+    textarea {
+      min-height: 80px;
+      resize: vertical;
+      font-family: inherit;
+    }
+    input:focus, textarea:focus, select:focus {
       border-color: #0366d6;
       outline: none;
       box-shadow: 0 0 0 3px rgba(3, 102, 214, 0.2);
@@ -79,6 +84,13 @@
     button.secondary:disabled {
       background-color: #8ab4e8;
       cursor: not-allowed;
+    }
+    button.tertiary {
+      background-color: #6f42c1;
+      color: white;
+    }
+    button.tertiary:hover {
+      background-color: #5a32a3;
     }
     .status {
       margin-top: 15px;
@@ -172,6 +184,29 @@
       gap: 10px;
       margin-top: 15px;
     }
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #d1d5da;
+      margin-bottom: 15px;
+    }
+    .tab {
+      padding: 8px 15px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      font-size: 14px;
+      color: #57606a;
+    }
+    .tab.active {
+      border-bottom-color: #0366d6;
+      color: #0366d6;
+      font-weight: 500;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -192,10 +227,46 @@
         <span class="config-label">Notion DB:</span>
         <span class="config-value" id="summaryDbId">-</span>
       </div>
-      <div class="actions">
-        <button id="syncNowBtnMain" class="secondary">
-          <span class="icon">🔄</span>Sync Now
-        </button>
+      
+      <div class="tabs">
+        <div class="tab active" data-tab="sync">Sync</div>
+        <div class="tab" data-tab="task">Add Task</div>
+      </div>
+      
+      <div id="syncTab" class="tab-content active">
+        <div class="actions">
+          <button id="syncNowBtnMain" class="secondary">
+            <span class="icon">🔄</span>Sync Now
+          </button>
+        </div>
+      </div>
+      
+      <div id="taskTab" class="tab-content">
+        <form id="addTaskForm">
+          <div class="form-group">
+            <label for="taskTitle">Task Title</label>
+            <input type="text" id="taskTitle" placeholder="Enter task title" required>
+          </div>
+          
+          <div class="form-group">
+            <label for="taskDescription">Description</label>
+            <textarea id="taskDescription" placeholder="Enter task description"></textarea>
+          </div>
+          
+          <div class="form-group">
+            <label for="taskStatus">Status</label>
+            <select id="taskStatus">
+              <option value="Open">Open</option>
+              <option value="Closed">Closed</option>
+            </select>
+          </div>
+          
+          <div class="actions">
+            <button type="submit" class="tertiary">
+              <span class="icon">➕</span>Add Task
+            </button>
+          </div>
+        </form>
       </div>
     </div>
     

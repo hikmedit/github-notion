@@ -53,6 +53,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     // Return true to indicate we'll respond asynchronously
     return true;
+  } else if (message.action === 'addTask') {
+    console.log('Adding manual task to Notion');
+    
+    // Create a task in Notion
+    addManualTaskToNotion(message.notionToken, message.notionDatabaseId, message.task)
+      .then(result => {
+        sendResponse({ success: true, message: 'Task added successfully', pageId: result.id });
+      })
+      .catch(error => {
+        console.error('Error adding task:', error);
+        sendResponse({ success: false, message: error.message });
+      });
+    
+    // Return true to indicate we'll respond asynchronously
+    return true;
   }
 });
 
@@ -635,6 +650,82 @@ async function createNotionDatabaseProperties(notionToken, databaseId) {
     return updatedDatabase;
   } catch (error) {
     console.error('Error creating Notion database properties:', error);
+    throw error;
+  }
+}
+
+// Add a manual task to Notion
+async function addManualTaskToNotion(notionToken, databaseId, task) {
+  try {
+    console.log(`Adding manual task "${task.title}" to Notion database ${databaseId}`);
+    
+    // Fix database ID format if needed
+    const formattedDatabaseId = formatNotionDatabaseId(databaseId);
+    
+    // Prepare the Notion page properties
+    const properties = {
+      'Name': {
+        title: [
+          {
+            text: {
+              content: task.title
+            }
+          }
+        ]
+      },
+      'State': {
+        select: {
+          name: task.status || 'Open'
+        }
+      }
+    };
+    
+    // Add GitHub ID as a custom value (to differentiate from real GitHub issues)
+    // Using a negative number to avoid collisions with real GitHub issue IDs
+    const timestamp = new Date().getTime();
+    properties['GitHub ID'] = {
+      number: -1 * Math.floor(timestamp / 1000) // Use negative timestamp as ID
+    };
+    
+    // If URL property exists in the database, add a fake URL
+    properties['URL'] = {
+      url: `notion://manual-task-${timestamp}`
+    };
+    
+    // Prepare the request data
+    const requestData = {
+      parent: { database_id: formattedDatabaseId },
+      properties
+    };
+    
+    // Add content if description is provided
+    if (task.description && task.description.trim()) {
+      requestData.children = createContentBlocks(task.description);
+    }
+    
+    // Create the page in Notion
+    const response = await fetch('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestData)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Notion API error (${response.status}):`, errorText);
+      throw new Error(`Notion API error: ${response.status} - ${errorText}`);
+    }
+    
+    const result = await response.json();
+    console.log(`Successfully added task to Notion: ${task.title}`);
+    
+    return result;
+  } catch (error) {
+    console.error('Error adding manual task to Notion:', error);
     throw error;
   }
 } 

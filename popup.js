@@ -16,7 +16,31 @@ document.addEventListener('DOMContentLoaded', () => {
   // Set up toggle config button handler
   const toggleConfigBtn = document.getElementById('toggleConfigBtn');
   toggleConfigBtn.addEventListener('click', toggleConfigForm);
+  
+  // Set up tab handlers
+  setupTabs();
+  
+  // Set up add task form handler
+  const addTaskForm = document.getElementById('addTaskForm');
+  addTaskForm.addEventListener('submit', addTaskToNotion);
 });
+
+// Set up tab functionality
+function setupTabs() {
+  const tabs = document.querySelectorAll('.tab');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      // Remove active class from all tabs and tab contents
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      
+      // Add active class to clicked tab and corresponding content
+      tab.classList.add('active');
+      const tabId = tab.getAttribute('data-tab');
+      document.getElementById(tabId + 'Tab').classList.add('active');
+    });
+  });
+}
 
 // Load saved configuration from chrome.storage.local
 function loadSavedConfig() {
@@ -47,6 +71,64 @@ function loadSavedConfig() {
     } else {
       showConfigForm();
     }
+  });
+}
+
+// Add a task to Notion
+function addTaskToNotion(event) {
+  event.preventDefault();
+  
+  // Get the task details
+  const title = document.getElementById('taskTitle').value.trim();
+  const description = document.getElementById('taskDescription').value.trim();
+  const status = document.getElementById('taskStatus').value;
+  
+  if (!title) {
+    showStatus('Task title is required', 'error');
+    return;
+  }
+  
+  // Get the Notion credentials
+  chrome.storage.local.get(['notionToken', 'notionDatabaseId'], (result) => {
+    if (!result.notionToken || !result.notionDatabaseId) {
+      showStatus('Notion configuration is incomplete. Please check your settings.', 'error');
+      return;
+    }
+    
+    // Show loading state
+    const addTaskBtn = document.querySelector('#addTaskForm button[type="submit"]');
+    addTaskBtn.disabled = true;
+    addTaskBtn.innerHTML = '<span class="icon">⏳</span>Adding...';
+    
+    // Send to background script to create the task
+    chrome.runtime.sendMessage({
+      action: 'addTask',
+      notionToken: result.notionToken,
+      notionDatabaseId: result.notionDatabaseId,
+      task: {
+        title,
+        description,
+        status
+      }
+    }, (response) => {
+      // Reset button state
+      addTaskBtn.disabled = false;
+      addTaskBtn.innerHTML = '<span class="icon">➕</span>Add Task';
+      
+      if (response && response.success) {
+        showStatus('Task added successfully to Notion', 'success');
+        
+        // Clear the form
+        document.getElementById('taskTitle').value = '';
+        document.getElementById('taskDescription').value = '';
+        document.getElementById('taskStatus').value = 'Open';
+      } else {
+        const errorMessage = response && response.message 
+          ? response.message 
+          : 'Failed to add task. Please try again.';
+        showStatus(errorMessage, 'error');
+      }
+    });
   });
 }
 

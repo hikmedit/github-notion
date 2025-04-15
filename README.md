@@ -11,6 +11,7 @@ A Chrome extension that automatically syncs GitHub issues to a Notion database. 
 - Distinguishes between open and closed issues
 - Syncs only actual issues (ignores pull requests)
 - Automatically updates existing issues when they change
+- **Create manual tasks directly in Notion** (independent of GitHub)
 
 ## Installation
 
@@ -72,10 +73,22 @@ The extension will automatically:
 
 Click the "Sync Now" button to manually sync GitHub issues to Notion.
 
+### Adding Manual Tasks
+
+You can create tasks directly in Notion without going through GitHub:
+
+1. Click the extension icon
+2. Select the "Add Task" tab
+3. Enter a title, description, and select a status
+4. Click "Add Task"
+
+This is useful for adding quick tasks or notes that don't need to be GitHub issues.
+
 ### View Configuration
 
 After your initial setup, the extension will display a compact view with just the repository and database information. You can:
 - Click the "Settings" button to show the full configuration form
+- Switch between "Sync" and "Add Task" tabs
 - Click "Sync Now" to manually trigger a sync
 
 ## Troubleshooting
