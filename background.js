@@ -1,304 +1,485 @@
-const GITHUB_API_BASE = 'https://api.github.com';
-const NOTION_API_BASE = 'https://api.notion.com/v1';
-const ALARM_NAME = 'syncIssues';
-
-// --- Event Listeners ---
-
+// Initialize alarm when extension is installed or updated
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('Extension installed. Setting up alarm...');
-  createSyncAlarm();
-  // Run sync immediately on install if settings exist
-  triggerSync();
+  // Create an alarm that fires every 5 minutes
+  chrome.alarms.create('syncGitHubIssues', { periodInMinutes: 5 });
+  console.log('GitHub to Notion sync alarm created');
 });
 
-// Note: onStartup event might not be reliable for persistent tasks in MV3.
-// Alarms are the preferred way. This listener is kept for potential immediate
-// sync on browser start if the alarm wasn't already running.
-chrome.runtime.onStartup.addListener(() => {
-    console.log('Browser started. Ensuring alarm exists...');
-    createSyncAlarm(); // Ensure alarm exists
-    // Optionally trigger sync on startup
-    // triggerSync();
-});
-
-
+// Listen for alarm events
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME) {
-    console.log('Alarm triggered. Starting sync...');
-    triggerSync();
+  if (alarm.name === 'syncGitHubIssues') {
+    syncGitHubIssues();
   }
 });
 
-// Optional: Listen for messages from popup (e.g., trigger sync after saving settings)
-// chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-//   if (request.action === "syncNow") {
-//     console.log("Manual sync triggered from popup.");
-//     triggerSync().then(() => sendResponse({ status: "Sync started" }))
-//                  .catch(error => {
-//                      console.error("Manual sync failed:", error);
-//                      sendResponse({ status: `Sync failed: ${error.message}` });
-//                  });
-//     return true; // Indicates asynchronous response
-//   }
-// });
+// Also sync when the browser starts
+chrome.runtime.onStartup.addListener(() => {
+  syncGitHubIssues();
+});
 
-
-// --- Core Logic ---
-
-function createSyncAlarm() {
-    chrome.alarms.get(ALARM_NAME, (existingAlarm) => {
-        if (!existingAlarm) {
-            chrome.alarms.create(ALARM_NAME, {
-                delayInMinutes: 1, // Start after 1 minute
-                periodInMinutes: 5 // Repeat every 5 minutes
-            });
-            console.log('Sync alarm created.');
+// Listen for messages from popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'manualSync') {
+    console.log('Manual sync triggered');
+    
+    // Run sync and return results to popup
+    syncGitHubIssues()
+      .then(result => {
+        if (result) {
+          sendResponse({ success: true, ...result });
         } else {
-            console.log('Sync alarm already exists.');
+          sendResponse({ success: false, message: 'No issues to sync or configuration incomplete' });
         }
-    });
-}
+      })
+      .catch(error => {
+        console.error('Error during sync:', error);
+        sendResponse({ success: false, message: error.message });
+      });
+    
+    // Return true to indicate we'll respond asynchronously
+    return true;
+  } else if (message.action === 'createNotionProperties') {
+    console.log('Creating Notion database properties');
+    
+    // Create required properties in Notion database
+    createNotionDatabaseProperties(message.notionToken, message.databaseId)
+      .then(result => {
+        sendResponse({ success: true, message: 'Properties created successfully' });
+      })
+      .catch(error => {
+        console.error('Error creating properties:', error);
+        sendResponse({ success: false, message: error.message });
+      });
+    
+    // Return true to indicate we'll respond asynchronously
+    return true;
+  }
+});
 
-async function triggerSync() {
-    try {
-        const settings = await getSettings();
-        if (!settings.githubToken || !settings.githubRepo || !settings.notionToken || !settings.notionDbId) {
-            console.warn('Configuration missing. Skipping sync.');
-            return;
-        }
-        await syncIssues(settings);
-        console.log('Sync completed successfully.');
-    } catch (error) {
-        console.error('Error during sync trigger:', error);
+async function syncGitHubIssues() {
+  try {
+    // Get configuration from storage
+    const config = await getConfig();
+    if (!isConfigValid(config)) {
+      console.log('Configuration incomplete, skipping sync');
+      return null;
     }
+
+    // Fetch issues from GitHub
+    const issues = await fetchGitHubIssues(config);
+    if (!issues || issues.length === 0) {
+      console.log('No issues to sync');
+      return { issuesCount: 0 };
+    }
+
+    console.log(`Fetched ${issues.length} issues from GitHub`);
+
+    // Sync to Notion
+    const result = await syncToNotion(issues, config);
+
+    console.log('Sync completed successfully');
+    return {
+      issuesCount: issues.length,
+      syncedCount: result.successful,
+      failedCount: result.failed
+    };
+  } catch (error) {
+    console.error('Error during sync:', error);
+    throw error;
+  }
 }
 
-async function getSettings() {
+async function getConfig() {
   return new Promise((resolve) => {
-    chrome.storage.local.get(['githubToken', 'githubRepo', 'notionToken', 'notionDbId'], resolve);
+    chrome.storage.local.get(['githubToken', 'githubRepo', 'notionToken', 'notionDatabaseId', 'lastSyncTime'], (result) => {
+      resolve(result);
+    });
   });
 }
 
-async function syncIssues(settings) {
-    console.log(`Fetching issues for repo: ${settings.githubRepo}`);
-    try {
-        const issues = await fetchGitHubIssues(settings.githubToken, settings.githubRepo);
-        const realIssues = issues.filter(issue => !issue.pull_request); // Filter out pull requests
-        console.log(`Found ${realIssues.length} actual issues.`);
-
-        if (realIssues.length === 0) {
-            console.log("No new issues to process.");
-            return;
-        }
-
-        // Process issues sequentially to avoid overwhelming APIs and simplify duplicate check
-        // For parallel processing (more complex): use Promise.allSettled
-        for (const issue of realIssues) {
-            await processIssue(issue, settings);
-        }
-
-    } catch (error) {
-        console.error('Error fetching or processing GitHub issues:', error);
-        // Consider adding user notification here
-    }
+function isConfigValid(config) {
+  return config.githubToken && config.githubRepo && config.notionToken && config.notionDatabaseId;
 }
 
-
-async function processIssue(issue, settings) {
-    try {
-        const existingPage = await findNotionPageByGitHubId(settings.notionToken, settings.notionDbId, issue.id);
-
-        if (existingPage) {
-            console.log(`Issue #${issue.number} (ID: ${issue.id}) already exists in Notion (Page ID: ${existingPage.id}). Checking for updates...`);
-            // Optional: Update existing page if state or other fields changed
-            // For now, we just skip if it exists.
-            // await updateNotionPageIfChanged(issue, existingPage, settings);
-        } else {
-            console.log(`Issue #${issue.number} (ID: ${issue.id}) not found in Notion. Creating...`);
-            await createNotionPage(issue, settings);
-            console.log(`Successfully created Notion page for Issue #${issue.number}`);
-        }
-    } catch (error) {
-        console.error(`Error processing Issue #${issue.number} (ID: ${issue.id}):`, error);
-    }
-}
-
-
-// --- API Helpers ---
-
-async function fetchGitHubIssues(token, repo) {
-  // Format: user/repo
-  const [owner, repoName] = repo.split('/');
-  if (!owner || !repoName) {
-      throw new Error('Invalid GitHub repo format. Use "owner/repo".');
+async function fetchGitHubIssues(config) {
+  const { githubToken, githubRepo, lastSyncTime } = config;
+  
+  // Construct the API URL
+  let url = `https://api.github.com/repos/${githubRepo}/issues?state=all&sort=updated&direction=desc`;
+  
+  // If we have a last sync time, only fetch issues updated since then
+  if (lastSyncTime) {
+    const since = new Date(lastSyncTime).toISOString();
+    url += `&since=${since}`;
   }
-
-  const url = `${GITHUB_API_BASE}/repos/${owner}/${repoName}/issues?state=all&sort=updated&direction=desc`; // Fetch all states, sort by update
-  const headers = {
-    'Authorization': `token ${token}`,
-    'Accept': 'application/vnd.github.v3+json',
-  };
-
-  console.log(`Fetching issues from: ${url}`);
-  const response = await fetch(url, { headers });
+  
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${githubToken}`,
+      'Accept': 'application/vnd.github.v3+json'
+    }
+  });
 
   if (!response.ok) {
-    const errorData = await response.text();
-    console.error("GitHub API Error Response:", errorData);
-    throw new Error(`GitHub API request failed: ${response.status} ${response.statusText}`);
+    throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
   }
 
   const issues = await response.json();
-  console.log(`Fetched ${issues.length} items from GitHub.`);
-  return issues; // Returns an array of issues
+  
+  // Filter out pull requests
+  return issues.filter(issue => !issue.pull_request);
 }
 
-
-async function findNotionPageByGitHubId(token, dbId, githubIssueId) {
-  const url = `${NOTION_API_BASE}/databases/${dbId}/query`;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'Content-Type': 'application/json',
-    'Notion-Version': '2022-06-28',
-  };
-  const body = JSON.stringify({
-    filter: {
-      property: 'GitHub ID', // Ensure this property name matches your Notion DB
-      number: {
-        equals: githubIssueId,
-      },
-    },
-    page_size: 1 // We only need to know if it exists
-  });
-
-//   console.log(`Querying Notion for GitHub ID: ${githubIssueId}`);
-  const response = await fetch(url, { method: 'POST', headers, body });
-
-  if (!response.ok) {
-    const errorData = await response.text();
-    console.error("Notion API Query Error Response:", errorData);
-    throw new Error(`Notion API query failed: ${response.status} ${response.statusText}`);
+async function syncToNotion(issues, config) {
+  const { notionToken, notionDatabaseId } = config;
+  
+  // Fix database ID format if needed
+  const formattedDatabaseId = formatNotionDatabaseId(notionDatabaseId);
+  
+  try {
+    // First check if the database has the required properties
+    await checkNotionDatabaseProperties(notionToken, formattedDatabaseId);
+    
+    // Process issues in batches to avoid overwhelming the API
+    const results = await Promise.allSettled(issues.map(issue => 
+      createOrUpdateNotionPage(issue, notionToken, formattedDatabaseId)
+    ));
+    
+    // Update last sync time
+    chrome.storage.local.set({ lastSyncTime: new Date().toISOString() });
+    
+    // Log results
+    const successful = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.filter(r => r.status === 'rejected').length;
+    
+    console.log(`Sync results: ${successful} successful, ${failed} failed`);
+    
+    // Return results for potential UI updates
+    return { successful, failed };
+  } catch (error) {
+    console.error('Error during sync to Notion:', error);
+    throw error;
   }
-
-  const data = await response.json();
-//   console.log("Notion query response:", data);
-  return data.results.length > 0 ? data.results[0] : null;
 }
 
+// Format Notion database ID to handle variations in format
+function formatNotionDatabaseId(databaseId) {
+  // Remove any hyphens
+  let formatted = databaseId.replace(/-/g, '');
+  
+  // If the length is 32 characters after removing hyphens, format it with hyphens
+  if (formatted.length === 32) {
+    return formatted.replace(/(\w{8})(\w{4})(\w{4})(\w{4})(\w{12})/, '$1-$2-$3-$4-$5');
+  }
+  
+  // Otherwise, return as is
+  return databaseId;
+}
 
-async function createNotionPage(issue, settings) {
-  const url = `${NOTION_API_BASE}/pages`;
-  const headers = {
-    'Authorization': `Bearer ${settings.notionToken}`,
-    'Content-Type': 'application/json',
-    'Notion-Version': '2022-06-28',
-  };
-
-  // Map GitHub state to Notion Select option name
-  const notionState = issue.state === 'open' ? 'Open' : 'Closed'; // Adjust if your Notion options differ
-
-  const body = JSON.stringify({
-    parent: { database_id: settings.notionDbId },
-    properties: {
-      // Ensure these property names EXACTLY match your Notion DB
-      'Name': { // Title property
+async function createOrUpdateNotionPage(issue, notionToken, databaseId) {
+  const { title, html_url, state, body, id, updated_at } = issue;
+  
+  try {
+    // Search if this issue already exists in the database
+    const existingPage = await findExistingIssuePage(id, notionToken, databaseId);
+    
+    // If the issue exists and hasn't been updated, skip it
+    if (existingPage && new Date(existingPage.last_edited_time) >= new Date(updated_at)) {
+      console.log(`Issue #${id} already up-to-date in Notion`);
+      return;
+    }
+    
+    // Prepare the Notion page properties
+    const properties = {
+      'Name': {
         title: [
           {
             text: {
-              content: issue.title,
-            },
-          },
-        ],
+              content: title
+            }
+          }
+        ]
       },
-      'URL': { // URL property
-        url: issue.html_url,
+      'URL': {
+        url: html_url
       },
-      'State': { // Select property
+      'State': {
         select: {
-          name: notionState,
-        },
-      },
-      'GitHub ID': { // Number property (for duplicate checking)
-          number: issue.id
-      }
-      // 'Body' property handled via content blocks below
-    },
-    // Add issue body as content blocks (basic paragraph for now)
-    children: [
-      {
-        object: 'block',
-        type: 'paragraph',
-        paragraph: {
-          rich_text: [
-            {
-              type: 'text',
-              text: {
-                // Notion API has a limit on text content length per block (e.g., 2000 chars)
-                // Truncate or split into multiple blocks if necessary for very long bodies
-                content: issue.body ? issue.body.substring(0, 2000) : "(No description)",
-              },
-            },
-          ],
-        },
-      },
-    ],
-  });
-
-//   console.log(`Creating Notion page for issue: ${issue.title}`);
-  const response = await fetch(url, { method: 'POST', headers, body });
-
-  if (!response.ok) {
-    const errorData = await response.text();
-    console.error("Notion API Create Page Error Response:", errorData);
-    throw new Error(`Notion API create page failed: ${response.status} ${response.statusText}`);
-  }
-
-  const newPage = await response.json();
-//   console.log("Notion create page response:", newPage);
-  return newPage;
-}
-
-// Optional: Function to update existing page (if needed)
-/*
-async function updateNotionPageIfChanged(issue, existingPage, settings) {
-    // Compare issue.state, issue.title etc. with existingPage properties
-    // If changes detected, call Notion API PATCH /pages/{page_id}
-    // Example: Check state change
-    const currentNotionState = existingPage.properties['State']?.select?.name;
-    const newNotionState = issue.state === 'open' ? 'Open' : 'Closed';
-
-    if (currentNotionState !== newNotionState) {
-        console.log(`State changed for Issue #${issue.number}. Updating Notion page ${existingPage.id}...`);
-        const url = `${NOTION_API_BASE}/pages/${existingPage.id}`;
-        const headers = {
-            'Authorization': `Bearer ${settings.notionToken}`,
-            'Content-Type': 'application/json',
-            'Notion-Version': '2022-06-28',
-        };
-        const body = JSON.stringify({
-            properties: {
-                'State': {
-                    select: {
-                        name: newNotionState,
-                    },
-                },
-                // Add other properties to update here if needed (e.g., title)
-            },
-        });
-
-        const response = await fetch(url, { method: 'PATCH', headers, body });
-        if (!response.ok) {
-            const errorData = await response.text();
-            console.error(`Failed to update Notion page ${existingPage.id}:`, errorData);
-            throw new Error(`Notion API update page failed: ${response.status} ${response.statusText}`);
+          name: state.charAt(0).toUpperCase() + state.slice(1) // Capitalize first letter
         }
-        console.log(`Successfully updated Notion page ${existingPage.id}`);
-    } else {
-        console.log(`No state change detected for Issue #${issue.number}.`);
+      },
+      'GitHub ID': {
+        number: id
+      }
+    };
+    
+    // Prepare the request data
+    const requestData = {
+      parent: { database_id: databaseId },
+      properties
+    };
+    
+    // Only include children (content) if body is not empty and we're creating a new page
+    // For existing pages (PATCH), we should not include empty children
+    if (body && body.trim() && !existingPage) {
+      requestData.children = [
+        {
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [
+              {
+                type: 'text',
+                text: {
+                  content: body
+                }
+              }
+            ]
+          }
+        }
+      ];
     }
+    
+    // Create a new page or update existing one
+    const url = existingPage 
+      ? `https://api.notion.com/v1/pages/${existingPage.id}`
+      : 'https://api.notion.com/v1/pages';
+      
+    const method = existingPage ? 'PATCH' : 'POST';
+    
+    console.log(`Making ${method} request to Notion API: ${url}`);
+    
+    const response = await fetch(url, {
+      method,
+      headers: {
+        'Authorization': `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestData)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Notion API error (${response.status}):`, errorText);
+      throw new Error(`Notion API error: ${response.status} - ${errorText}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error(`Error processing issue #${id}:`, error);
+    throw error;
+  }
 }
-*/
 
-console.log("Background script loaded.");
-// Initial check to ensure alarm is set after script is loaded/reloaded
-createSyncAlarm(); 
+async function findExistingIssuePage(issueId, notionToken, databaseId) {
+  try {
+    console.log(`Searching for issue #${issueId} in Notion database ${databaseId}`);
+    
+    // Query the database for pages with the matching GitHub issue ID
+    const response = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        filter: {
+          property: 'GitHub ID',
+          number: {
+            equals: issueId
+          }
+        }
+      })
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Notion database query error (${response.status}):`, errorText);
+      
+      // Try to provide more helpful error message
+      if (response.status === 404) {
+        console.log('Notion database not found. Please check:');
+        console.log('1. Database ID is correct');
+        console.log('2. The Notion integration has access to the database');
+        console.log('3. The database has a "GitHub ID" property configured');
+      }
+      
+      throw new Error(`Notion database query error: ${response.status} - ${errorText}`);
+    }
+    
+    const result = await response.json();
+    
+    // Return the first matching page or null if none found
+    return result.results.length > 0 ? result.results[0] : null;
+  } catch (error) {
+    console.error(`Error searching for issue #${issueId}:`, error);
+    throw error;
+  }
+}
+
+// Check if the Notion database has all required properties
+async function checkNotionDatabaseProperties(notionToken, databaseId) {
+  console.log(`Checking properties for Notion database ${databaseId}`);
+  
+  try {
+    // Fetch database schema
+    const response = await fetch(`https://api.notion.com/v1/databases/${databaseId}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28'
+      }
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Error fetching database schema: ${response.status}`, errorText);
+      throw new Error(`Notion database error: ${response.status} - ${errorText}`);
+    }
+    
+    const database = await response.json();
+    const properties = database.properties || {};
+    
+    // Check required properties
+    const requiredProperties = [
+      { name: 'Name', type: 'title' },
+      { name: 'URL', type: 'url' },
+      { name: 'State', type: 'select' },
+      { name: 'GitHub ID', type: 'number' }
+    ];
+    
+    const missingProperties = [];
+    
+    for (const prop of requiredProperties) {
+      const property = Object.values(properties).find(p => p.name === prop.name);
+      if (!property) {
+        missingProperties.push(prop);
+      } else if (property.type !== prop.type) {
+        missingProperties.push({ ...prop, existingType: property.type });
+      }
+    }
+    
+    if (missingProperties.length > 0) {
+      const missingList = missingProperties.map(p => 
+        p.existingType 
+          ? `"${p.name}" (found as ${p.existingType}, but should be ${p.type})`
+          : `"${p.name}" (type: ${p.type})`
+      ).join(', ');
+      
+      throw new Error(`Notion database is missing required properties: ${missingList}`);
+    }
+    
+    console.log('All required properties found in Notion database');
+    return true;
+  } catch (error) {
+    console.error('Error checking Notion database properties:', error);
+    throw error;
+  }
+}
+
+// Create required properties in a Notion database
+async function createNotionDatabaseProperties(notionToken, databaseId) {
+  console.log(`Creating properties for Notion database ${databaseId}`);
+  
+  try {
+    // Fix database ID format if needed
+    const formattedDatabaseId = formatNotionDatabaseId(databaseId);
+    
+    // First, fetch the current database structure
+    const response = await fetch(`https://api.notion.com/v1/databases/${formattedDatabaseId}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28'
+      }
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Error fetching database: ${response.status}`, errorText);
+      throw new Error(`Notion database error: ${response.status} - ${errorText}`);
+    }
+    
+    const database = await response.json();
+    
+    // Prepare updated database with required properties
+    const updatedProperties = { ...database.properties };
+    
+    // Title property (Name) is special - if it doesn't exist, we need to rename an existing title
+    const existingTitleProp = Object.values(updatedProperties).find(p => p.type === 'title');
+    
+    // If a title property already exists with different name, we'll need to use it
+    if (existingTitleProp && existingTitleProp.name !== 'Name') {
+      // Remember the old name for logging
+      const oldTitleName = existingTitleProp.name;
+      
+      // Rename it to "Name"
+      delete updatedProperties[oldTitleName];
+      updatedProperties['Name'] = {
+        title: {}
+      };
+      
+      console.log(`Renamed title property from "${oldTitleName}" to "Name"`);
+    } else if (!existingTitleProp) {
+      // Every database must have a title property, so this is unlikely
+      updatedProperties['Name'] = {
+        title: {}
+      };
+    }
+    
+    // Add URL property if it doesn't exist
+    if (!Object.values(updatedProperties).find(p => p.name === 'URL')) {
+      updatedProperties['URL'] = {
+        url: {}
+      };
+    }
+    
+    // Add State property if it doesn't exist
+    if (!Object.values(updatedProperties).find(p => p.name === 'State')) {
+      updatedProperties['State'] = {
+        select: {
+          options: [
+            { name: 'Open', color: 'green' },
+            { name: 'Closed', color: 'red' }
+          ]
+        }
+      };
+    }
+    
+    // Add GitHub ID property if it doesn't exist
+    if (!Object.values(updatedProperties).find(p => p.name === 'GitHub ID')) {
+      updatedProperties['GitHub ID'] = {
+        number: {}
+      };
+    }
+    
+    // Update the database
+    const updateResponse = await fetch(`https://api.notion.com/v1/databases/${formattedDatabaseId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        properties: updatedProperties
+      })
+    });
+    
+    if (!updateResponse.ok) {
+      const errorText = await updateResponse.text();
+      console.error(`Error updating database: ${updateResponse.status}`, errorText);
+      throw new Error(`Notion database update error: ${updateResponse.status} - ${errorText}`);
+    }
+    
+    const updatedDatabase = await updateResponse.json();
+    console.log('Successfully updated Notion database properties');
+    
+    return updatedDatabase;
+  } catch (error) {
+    console.error('Error creating Notion database properties:', error);
+    throw error;
+  }
+} 
