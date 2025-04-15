@@ -213,31 +213,16 @@ async function createOrUpdateNotionPage(issue, notionToken, databaseId) {
       }
     };
     
-    // Prepare the request data
+    // Prepare the request data for creating or updating the page
     const requestData = {
       parent: { database_id: databaseId },
       properties
     };
     
-    // Only include children (content) if body is not empty and we're creating a new page
-    // For existing pages (PATCH), we should not include empty children
-    if (body && body.trim() && !existingPage) {
-      requestData.children = [
-        {
-          object: 'block',
-          type: 'paragraph',
-          paragraph: {
-            rich_text: [
-              {
-                type: 'text',
-                text: {
-                  content: body
-                }
-              }
-            ]
-          }
-        }
-      ];
+    // Only include children (content) if creating a new page
+    // For existing pages, we'll update the content separately
+    if (!existingPage && body) {
+      requestData.children = createContentBlocks(body);
     }
     
     // Create a new page or update existing one
@@ -265,10 +250,180 @@ async function createOrUpdateNotionPage(issue, notionToken, databaseId) {
       throw new Error(`Notion API error: ${response.status} - ${errorText}`);
     }
     
-    return await response.json();
+    const result = await response.json();
+    
+    // If updating an existing page and there's body content, update the page content separately
+    if (existingPage && body) {
+      await updateNotionPageContent(result.id, body, notionToken);
+    }
+    
+    return result;
   } catch (error) {
     console.error(`Error processing issue #${id}:`, error);
     throw error;
+  }
+}
+
+// Helper function to create content blocks from GitHub issue body
+function createContentBlocks(body) {
+  if (!body || !body.trim()) {
+    return [];
+  }
+  
+  // Format GitHub Markdown to simpler text blocks
+  // You could expand this to handle markdown formatting better
+  const paragraphs = body.split('\n\n');
+  
+  return paragraphs.map(paragraph => {
+    if (paragraph.trim().startsWith('```')) {
+      // This is a code block
+      const codeContent = paragraph.replace(/```[\w]*\n/, '').replace(/```$/, '');
+      return {
+        object: 'block',
+        type: 'code',
+        code: {
+          rich_text: [{
+            type: 'text',
+            text: {
+              content: codeContent
+            }
+          }],
+          language: 'plain text'
+        }
+      };
+    } else if (paragraph.trim().startsWith('#')) {
+      // This is a heading
+      const level = paragraph.match(/^#+/)[0].length;
+      const headingContent = paragraph.replace(/^#+\s/, '');
+      
+      const headingTypes = ['heading_1', 'heading_2', 'heading_3'];
+      const headingType = level <= 3 ? headingTypes[level - 1] : 'heading_3';
+      
+      return {
+        object: 'block',
+        type: headingType,
+        [headingType]: {
+          rich_text: [{
+            type: 'text',
+            text: {
+              content: headingContent
+            }
+          }]
+        }
+      };
+    } else if (paragraph.trim().startsWith('- ') || paragraph.trim().startsWith('* ')) {
+      // This is a list item
+      const items = paragraph.split('\n')
+        .filter(line => line.trim().startsWith('- ') || line.trim().startsWith('* '))
+        .map(line => line.replace(/^[\-\*]\s/, ''));
+      
+      return {
+        object: 'block',
+        type: 'bulleted_list_item',
+        bulleted_list_item: {
+          rich_text: [{
+            type: 'text',
+            text: {
+              content: items.join('\n')
+            }
+          }]
+        }
+      };
+    } else {
+      // Default to paragraph
+      return {
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [{
+            type: 'text',
+            text: {
+              content: paragraph
+            }
+          }]
+        }
+      };
+    }
+  }).filter(block => block.type !== 'paragraph' || block.paragraph.rich_text[0].text.content.trim() !== '');
+}
+
+// Update content of an existing Notion page
+async function updateNotionPageContent(pageId, content, notionToken) {
+  try {
+    console.log(`Updating content for Notion page ${pageId}`);
+    
+    // First, clear existing content by deleting children blocks
+    await deleteNotionPageBlocks(pageId, notionToken);
+    
+    // Then, add new content blocks
+    const blocks = createContentBlocks(content);
+    
+    if (blocks.length === 0) {
+      console.log('No content blocks to add');
+      return;
+    }
+    
+    const response = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        children: blocks
+      })
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Error updating page content: ${response.status}`, errorText);
+      throw new Error(`Notion API error updating content: ${response.status} - ${errorText}`);
+    }
+    
+    console.log(`Successfully updated content for page ${pageId}`);
+    
+    return await response.json();
+  } catch (error) {
+    console.error(`Error updating page content:`, error);
+    throw error;
+  }
+}
+
+// Delete all blocks in a Notion page
+async function deleteNotionPageBlocks(pageId, notionToken) {
+  try {
+    // Get existing blocks
+    const blocksResponse = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${notionToken}`,
+        'Notion-Version': '2022-06-28'
+      }
+    });
+    
+    if (!blocksResponse.ok) {
+      console.error(`Error fetching blocks: ${blocksResponse.status}`);
+      return; // Continue with adding new blocks even if we couldn't delete old ones
+    }
+    
+    const blocks = await blocksResponse.json();
+    
+    // Delete each block
+    for (const block of blocks.results) {
+      await fetch(`https://api.notion.com/v1/blocks/${block.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${notionToken}`,
+          'Notion-Version': '2022-06-28'
+        }
+      });
+    }
+    
+    console.log(`Deleted ${blocks.results.length} blocks from page ${pageId}`);
+  } catch (error) {
+    console.error(`Error deleting blocks:`, error);
+    // Continue with adding new blocks even if we couldn't delete old ones
   }
 }
 
